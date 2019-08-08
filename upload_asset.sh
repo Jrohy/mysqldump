@@ -8,9 +8,9 @@ function uploadfile() {
   FILE=$1
   CTYPE=$(file -b --mime-type $FILE)
 
-  sleep 1
   curl -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: ${CTYPE}" --data-binary @$FILE "https://uploads.github.com/repos/Jrohy/mysqldump/releases/${RELEASE_ID}/assets?name=$(basename $FILE)"
-  sleep 1
+
+  echo ""
 }
 
 function upload() {
@@ -24,7 +24,7 @@ function upload() {
   uploadfile $DGST
 }
 
-pushd `pwd`
+pushd `pwd` &>/dev/null
 
 go get github.com/mitchellh/gox
 
@@ -39,6 +39,9 @@ do
     upload $ITEM
 done
 
-popd
+echo ""
+echo "upload completed!"
+
+popd &>/dev/null
 
 rm -rf result
