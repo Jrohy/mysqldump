@@ -1,12 +1,3 @@
-/*
- * go-mydumper
- * xelabs.org
- *
- * Copyright (c) XeLabs
- * GPL License
- *
- */
-
 package main
 
 import (
@@ -21,19 +12,11 @@ import (
 	xlog "mysqldump/xlog"
 )
 
-func writeMetaData(args *common.Args) {
-	file := fmt.Sprintf("%s/metadata", args.Outdir)
-	common.WriteFile(file, "")
-}
+var excludeTable string
 
-func dumpDatabaseSchema(log *xlog.Log, conn *common.Connection, args *common.Args) {
-	err := conn.Execute(fmt.Sprintf("USE `%s`", args.Database))
-	common.AssertNil(err)
-
-	schema := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`;", args.Database)
-	file := fmt.Sprintf("%s/%s-schema-create.sql", args.Outdir, args.Database)
-	common.WriteFile(file, schema)
-	log.Info("dumping.database[%s].schema...", args.Database)
+func writeDBName(args *common.Args) {
+	file := fmt.Sprintf("%s/dbname", args.Outdir)
+	_ = common.WriteFile(file, args.Database)
 }
 
 func dumpTableSchema(log *xlog.Log, conn *common.Connection, args *common.Args, table string) {
@@ -41,8 +24,15 @@ func dumpTableSchema(log *xlog.Log, conn *common.Connection, args *common.Args, 
 	common.AssertNil(err)
 	schema := qr.Rows[0][1].String() + ";\n"
 
-	file := fmt.Sprintf("%s/%s.%s-schema.sql", args.Outdir, args.Database, table)
-	common.WriteFile(file, schema)
+	var file string
+	if strings.Contains(schema, "DEFINER VIEW") {
+		file = fmt.Sprintf("%s/%s-schema-view.sql", args.Outdir, table)
+		//exclude view data
+		excludeTable = excludeTable + table + ","
+	} else {
+		file = fmt.Sprintf("%s/%s-schema.sql", args.Outdir, table)
+	}
+	_ = common.WriteFile(file, schema)
 	log.Info("dumping.table[%s.%s].schema...", args.Database, table)
 }
 
@@ -101,10 +91,10 @@ func dumpTable(log *xlog.Log, conn *common.Connection, args *common.Args, table 
 
 		if (chunkbytes / 1024 / 1024) >= args.ChunksizeInMB {
 			query := strings.Join(inserts, ";\n") + ";\n"
-			file := fmt.Sprintf("%s/%s.%s.%05d.sql", args.Outdir, args.Database, table, fileNo)
-			common.WriteFile(file, query)
+			file := fmt.Sprintf("%s/%s.%05d.sql", args.Outdir, table, fileNo)
+			_ = common.WriteFile(file, query)
 
-			log.Info("dumping.table[%s.%s].rows[%v].bytes[%vMB].part[%v].thread[%d]", args.Database, table, allRows, (allBytes / 1024 / 1024), fileNo, conn.ID)
+			log.Info("dumping.table[%s.%s].rows[%v].bytes[%vMB].part[%v].thread[%d]", args.Database, table, allRows, allBytes/1024/1024, fileNo, conn.ID)
 			inserts = inserts[:0]
 			chunkbytes = 0
 			fileNo++
@@ -117,16 +107,16 @@ func dumpTable(log *xlog.Log, conn *common.Connection, args *common.Args, table 
 		}
 
 		query := strings.Join(inserts, ";\n") + ";\n"
-		file := fmt.Sprintf("%s/%s.%s.%05d.sql", args.Outdir, args.Database, table, fileNo)
-		common.WriteFile(file, query)
+		file := fmt.Sprintf("%s/%s.%05d.sql", args.Outdir, table, fileNo)
+		_ = common.WriteFile(file, query)
 	}
 	err = cursor.Close()
 	common.AssertNil(err)
 
-	log.Info("dumping.table[%s.%s].done.allrows[%v].allbytes[%vMB].thread[%d]...", args.Database, table, allRows, (allBytes / 1024 / 1024), conn.ID)
+	log.Info("dumping.table[%s.%s].done.allrows[%v].allbytes[%vMB].thread[%d]...", args.Database, table, allRows, allBytes/1024/1024, conn.ID)
 }
 
-func allTables(log *xlog.Log, conn *common.Connection, args *common.Args) []string {
+func allTables(conn *common.Connection, args *common.Args) []string {
 	qr, err := conn.Fetch(fmt.Sprintf("SHOW TABLES FROM `%s`", args.Database))
 	common.AssertNil(err)
 
@@ -143,37 +133,41 @@ func Dumper(log *xlog.Log, args *common.Args) {
 	common.AssertNil(err)
 	defer pool.Close()
 
-	// Meta data.
-	writeMetaData(args)
+	// database name
+	writeDBName(args)
 
 	// database.
 	conn := pool.Get()
-	dumpDatabaseSchema(log, conn, args)
 
 	// tables.
 	var wg sync.WaitGroup
 	var tables []string
 	t := time.Now()
+	if args.ExcludeTables != "" {
+		excludeTable = excludeTable + args.ExcludeTables + ","
+	}
 	if args.Table != "" {
 		tables = strings.Split(args.Table, ",")
 	} else {
-		tables = allTables(log, conn, args)
+		tables = allTables(conn, args)
 	}
 	pool.Put(conn)
 
 	for _, table := range tables {
 		conn := pool.Get()
 		dumpTableSchema(log, conn, args, table)
-
 		wg.Add(1)
 		go func(conn *common.Connection, table string) {
 			defer func() {
 				wg.Done()
 				pool.Put(conn)
 			}()
-			log.Info("dumping.table[%s.%s].datas.thread[%d]...", args.Database, table, conn.ID)
-			dumpTable(log, conn, args, table)
-			log.Info("dumping.table[%s.%s].datas.thread[%d].done...", args.Database, table, conn.ID)
+			// excludeTable can't dump data
+			if !strings.Contains(excludeTable, table) {
+				log.Info("dumping.table[%s.%s].datas.thread[%d]...", args.Database, table, conn.ID)
+				dumpTable(log, conn, args, table)
+				log.Info("dumping.table[%s.%s].datas.thread[%d].done...", args.Database, table, conn.ID)
+			}
 		}(conn, table)
 	}
 
@@ -190,6 +184,6 @@ func Dumper(log *xlog.Log, args *common.Args) {
 	}()
 
 	wg.Wait()
-	elapsed := time.Since(t).Seconds()
-	log.Info("dumping.all.done.cost[%.2fsec].allrows[%v].allbytes[%v].rate[%.2fMB/s]", elapsed, args.Allrows, args.Allbytes, (float64(args.Allbytes/1024/1024) / elapsed))
+	elapsedStr, elapsed := time.Since(t).String(), time.Since(t).Seconds()
+	log.Info("dumping.all.done.cost[%s].allrows[%v].allbytes[%v].rate[%.2fMB/s]", elapsedStr, args.Allrows, args.Allbytes, float64(args.Allbytes/1024/1024)/elapsed)
 }

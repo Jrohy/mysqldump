@@ -1,12 +1,3 @@
-/*
- * go-mydumper
- * xelabs.org
- *
- * Copyright (c) XeLabs
- * GPL License
- *
- */
-
 package common
 
 import (

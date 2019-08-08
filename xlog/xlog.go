@@ -1,12 +1,3 @@
-/*
- * go-mysqlstack
- * xelabs.org
- *
- * Copyright (c) XeLabs
- * GPL License
- *
- */
-
 package log
 
 import (

@@ -1,12 +1,3 @@
-/*
- * go-mydumper
- * xelabs.org
- *
- * Copyright (c) XeLabs
- * GPL License
- *
- */
-
 package common
 
 import (
@@ -29,6 +20,7 @@ type Args struct {
 	Table           string
 	Outdir          string
 	SessionVars     string
+	ExcludeTables   string
 	Threads         int
 	ChunksizeInMB   int
 	StmtSize        int
