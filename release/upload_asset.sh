@@ -28,7 +28,7 @@ pushd `pwd` &>/dev/null
 
 go get github.com/mitchellh/gox
 
-gox -output="result/mysqldump_{{.OS}}_{{.Arch}}" -ldflags="-s -w"
+gox -output="result/mysqldump_{{.OS}}_{{.Arch}}" -ldflags="-s -w" ..
 
 cd result
 
