@@ -1,4 +1,6 @@
 # mysqldump
+[![Go Report Card](https://goreportcard.com/badge/github.com/Jrohy/mysqldump)](https://goreportcard.com/report/github.com/Jrohy/mysqldump)
+[![Downloads](https://img.shields.io/github/downloads/Jrohy/mysqldump/total.svg)](https://img.shields.io/github/downloads/Jrohy/mysqldump/total.svg)
 
 go语言版mysqldump, goroutine并发导sql, 比navicat等工具导出sql快！
 
