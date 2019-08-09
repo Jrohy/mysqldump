@@ -129,7 +129,7 @@ func allTables(conn *common.Connection, args *common.Args) []string {
 
 // Dumper used to start the dumper worker.
 func Dumper(log *xlog.Log, args *common.Args) {
-	pool, err := common.NewPool(log, args.Threads, args.Address, args.User, args.Password, args.SessionVars)
+	pool, err := common.NewPool(log, args.Threads, args.Address, args.User, args.Password)
 	common.AssertNil(err)
 	defer pool.Close()
 

@@ -19,7 +19,6 @@ type Args struct {
 	Database        string
 	Table           string
 	Outdir          string
-	SessionVars     string
 	ExcludeTables   string
 	Threads         int
 	ChunksizeInMB   int

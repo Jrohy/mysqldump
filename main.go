@@ -14,9 +14,9 @@ import (
 const Pattern = `\w+:\w+@[\w.]+:\d{0,5}$`
 
 var (
-	flagOverwriteTables                                                                                                           bool
-	flagChunksize, flagThreads, flagPort, flagStmtSize                                                                            int
-	flagUser, flagPasswd, flagHost, flagSource, flagDb, flagTable, flagOutputDir, flagInputDir, flagExcludeTable, flagSessionVars string
+	flagOverwriteTables                                                                                          bool
+	flagChunksize, flagThreads, flagPort, flagStmtSize                                                           int
+	flagUser, flagPasswd, flagHost, flagSource, flagDb, flagTable, flagOutputDir, flagInputDir, flagExcludeTable string
 
 	log = xlog.NewStdLog(xlog.Level(xlog.INFO))
 )
@@ -33,7 +33,6 @@ func init() {
 	flag.IntVar(&flagChunksize, "F", 128, "Split tables into chunks of this output file size. This value is in MB")
 	flag.IntVar(&flagThreads, "t", 16, "Number of threads to use")
 	flag.IntVar(&flagStmtSize, "s", 1000000, "Attempted size of INSERT statement in bytes")
-	flag.StringVar(&flagSessionVars, "vars", "", "Session variables")
 	flag.StringVar(&flagSource, "m", "", "Mysql source info in one string, format: user:password@host:port")
 	flag.StringVar(&flagExcludeTable, "exclude", "", "Do not dump the specified table data, use ',' to split multiple table")
 	flag.BoolVar(&flagOverwriteTables, "d", false, "Drop tables if they already exist(import dump mode)")
@@ -102,7 +101,6 @@ func main() {
 		Threads:         flagThreads,
 		StmtSize:        flagStmtSize,
 		IntervalMs:      10 * 1000,
-		SessionVars:     flagSessionVars,
 		OverwriteTables: flagOverwriteTables,
 		ExcludeTables:   flagExcludeTable,
 	}

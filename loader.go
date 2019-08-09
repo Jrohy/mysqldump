@@ -142,7 +142,7 @@ func restoreTable(log *xlog.Log, table string, conn *common.Connection) int {
 
 // Loader used to start the loader worker.
 func Loader(log *xlog.Log, args *common.Args) {
-	pool, err := common.NewPool(log, args.Threads, args.Address, args.User, args.Password, args.SessionVars)
+	pool, err := common.NewPool(log, args.Threads, args.Address, args.User, args.Password)
 	common.AssertNil(err)
 	defer pool.Close()
 
