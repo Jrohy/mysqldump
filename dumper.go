@@ -19,6 +19,22 @@ func writeDBName(args *common.Args) {
 	_ = common.WriteFile(file, args.Database)
 }
 
+func dumpFunctionSchema(log *xlog.Log, conn *common.Connection, args *common.Args) {
+	qr, err := conn.Fetch(fmt.Sprintf("SELECT `name` FROM mysql.proc WHERE type = 'FUNCTION' AND db = '%s'", args.Database))
+	common.AssertNil(err)
+
+	for _, t := range qr.Rows {
+		function := t[0].String()
+		qr, err := conn.Fetch(fmt.Sprintf("SHOW CREATE FUNCTION `%s`.`%s`", args.Database, function))
+		common.AssertNil(err)
+
+		schema := qr.Rows[0][2].String() + ";\n"
+		file := fmt.Sprintf("%s/%s-schema-function.sql", args.Outdir, function)
+		_ = common.WriteFile(file, schema)
+		log.Info("dumping.function[%s.%s].schema...", args.Database, function)
+	}
+}
+
 func dumpTableSchema(log *xlog.Log, conn *common.Connection, args *common.Args, table string) {
 	qr, err := conn.Fetch(fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", args.Database, table))
 	common.AssertNil(err)
@@ -139,10 +155,14 @@ func Dumper(log *xlog.Log, args *common.Args) {
 	// database.
 	conn := pool.Get()
 
-	// tables.
 	var wg sync.WaitGroup
 	var tables []string
 	t := time.Now()
+
+	//function
+	dumpFunctionSchema(log, conn, args)
+
+	//table
 	if args.ExcludeTables != "" {
 		excludeTable = excludeTable + args.ExcludeTables + ","
 	}

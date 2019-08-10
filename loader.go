@@ -16,15 +16,17 @@ import (
 
 // Files tuple.
 type Files struct {
-	schemas []string
-	tables  []string
+	function []string
+	schemas  []string
+	tables   []string
 }
 
 var (
-	viewSuffix   = "-schema-view.sql"
-	schemaSuffix = "-schema.sql"
-	tableSuffix  = ".sql"
-	dbName       = ""
+	functionSuffix = "-schema-function.sql"
+	viewSuffix     = "-schema-view.sql"
+	schemaSuffix   = "-schema.sql"
+	tableSuffix    = ".sql"
+	dbName         = ""
 )
 
 func loadFiles(log *xlog.Log, dir string) *Files {
@@ -39,6 +41,8 @@ func loadFiles(log *xlog.Log, dir string) *Files {
 			switch {
 			case strings.HasSuffix(path, schemaSuffix):
 				files.schemas = append(files.schemas, path)
+			case strings.HasSuffix(path, functionSuffix):
+				files.function = append(files.function, path)
 			case strings.HasSuffix(path, viewSuffix):
 				views = append(views, path)
 			default:
@@ -73,6 +77,24 @@ func restoreDatabaseSchema(log *xlog.Log, db string, conn *common.Connection) {
 	log.Info("restoring.database[%s]", dbName)
 }
 
+func restoreFunctionSchema(log *xlog.Log, functions []string, conn *common.Connection) {
+	for _, function := range functions {
+		name := strings.TrimSuffix(filepath.Base(function), functionSuffix)
+
+		dropQuery := fmt.Sprintf("DROP FUNCTION IF EXISTS %s", name)
+		err := conn.Execute(dropQuery)
+		common.AssertNil(err)
+
+		data, err := common.ReadFile(function)
+		common.AssertNil(err)
+		query := common.BytesToString(data)
+
+		err = conn.Execute(query)
+		common.AssertNil(err)
+		log.Info("restoring.function[%s]", name)
+	}
+}
+
 func restoreTableSchema(log *xlog.Log, overwrite bool, tables []string, conn *common.Connection) {
 	for _, table := range tables {
 		// use
@@ -81,10 +103,7 @@ func restoreTableSchema(log *xlog.Log, overwrite bool, tables []string, conn *co
 
 		log.Info("working.table[%s]", name)
 
-		err := conn.Execute(fmt.Sprintf("USE `%s`", dbName))
-		common.AssertNil(err)
-
-		err = conn.Execute("SET FOREIGN_KEY_CHECKS=0")
+		err := conn.Execute("SET FOREIGN_KEY_CHECKS=0")
 		common.AssertNil(err)
 
 		data, err := common.ReadFile(table)
@@ -146,16 +165,22 @@ func Loader(log *xlog.Log, args *common.Args) {
 	common.AssertNil(err)
 	defer pool.Close()
 
+	t := time.Now()
 	files := loadFiles(log, args.Outdir)
 
-	// database.
 	conn := pool.Get()
-	restoreDatabaseSchema(log, args.Database, conn)
-	pool.Put(conn)
 
+	// database.
+	restoreDatabaseSchema(log, args.Database, conn)
+
+	err = conn.Execute(fmt.Sprintf("USE `%s`", dbName))
+	common.AssertNil(err)
+
+	// function.
+	restoreFunctionSchema(log, files.function, conn)
 	// tables.
-	conn = pool.Get()
 	restoreTableSchema(log, args.OverwriteTables, files.schemas, conn)
+
 	pool.Put(conn)
 
 	// Shuffle the tables
@@ -166,7 +191,6 @@ func Loader(log *xlog.Log, args *common.Args) {
 
 	var wg sync.WaitGroup
 	var bytes uint64
-	t := time.Now()
 	for _, table := range files.tables {
 		conn := pool.Get()
 		wg.Add(1)

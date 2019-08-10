@@ -9,11 +9,12 @@ go语言版mysqldump, goroutine并发导sql, 比navicat等工具导出sql快！
 此项目为: https://github.com/xelabs/go-mydumper 项目的修改优化版
 
 如下变更:
-- 加入mysql source组合源命令(-m), 传参 -m user:pass@host:port 即可定义mysql源, 简化传参
-- 加入排除指定table数据导出sql 命令(-exclude)
 - 修复视图view导出后无法导入的问题
+- 增加function的导入导出
+- 加入mysql source组合源命令(-m), 传参 -m user:pass@host:port, 简化传参
+- 加入排除指定table数据导出sql 命令(-exclude)
 - 优化日志格式和运行时间的显示
-- 合并导入和导出sql功能到同一个文件(-i/-o来分区导入sql还是导出sql)
+- 合并导入和导出sql功能到同一个文件(-i/-o来分区)
 - 提供所有平台的release编译文件
 
 ## 命令行
