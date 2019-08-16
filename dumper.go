@@ -2,68 +2,74 @@ package main
 
 import (
 	"fmt"
+	"github.com/go-xorm/xorm"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"xorm.io/core"
 
-	querypb "github.com/xelabs/go-mysqlstack/sqlparser/depends/query"
 	"mysqldump/common"
 	xlog "mysqldump/xlog"
 )
-
-var excludeTable string
 
 func writeDBName(args *common.Args) {
 	file := fmt.Sprintf("%s/dbname", args.Outdir)
 	_ = common.WriteFile(file, args.Database)
 }
 
-func dumpFunctionSchema(log *xlog.Log, conn *common.Connection, args *common.Args) {
-	qr, err := conn.Fetch(fmt.Sprintf("SELECT `name` FROM mysql.proc WHERE type = 'FUNCTION' AND db = '%s'", args.Database))
+func dumpViewSchema(log *xlog.Log, engine *xorm.Engine, args *common.Args) {
+	qr, err := engine.QueryString(fmt.Sprintf("SHOW TABLE STATUS FROM %s WHERE Comment='view';", args.Database))
 	common.AssertNil(err)
 
-	for _, t := range qr.Rows {
-		function := t[0].String()
-		qr, err := conn.Fetch(fmt.Sprintf("SHOW CREATE FUNCTION `%s`.`%s`", args.Database, function))
+	for _, t := range qr {
+		viewName := t["Name"]
+		create, err := engine.QueryString(fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", args.Database, viewName))
 		common.AssertNil(err)
 
-		schema := qr.Rows[0][2].String() + ";\n"
-		file := fmt.Sprintf("%s/%s-schema-function.sql", args.Outdir, function)
+		schema := create[0]["Create View"] + ";\n"
+		file := fmt.Sprintf("%s/%s-view.sql", args.Outdir, viewName)
 		_ = common.WriteFile(file, schema)
-		log.Info("dumping.function[%s.%s].schema...", args.Database, function)
+		log.Info("dumping.view[%s.%s].schema...", args.Database, viewName)
 	}
 }
 
-func dumpTableSchema(log *xlog.Log, conn *common.Connection, args *common.Args, table string) {
-	qr, err := conn.Fetch(fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", args.Database, table))
+func dumpRoutineSchema(log *xlog.Log, engine *xorm.Engine, args *common.Args, routineType string) {
+	qr, err := engine.QueryString(fmt.Sprintf("SELECT ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_TYPE = '%s' AND ROUTINE_SCHEMA = '%s'", routineType, args.Database))
 	common.AssertNil(err)
-	schema := qr.Rows[0][1].String() + ";\n"
 
-	var file string
-	if strings.Contains(schema, "DEFINER VIEW") {
-		file = fmt.Sprintf("%s/%s-schema-view.sql", args.Outdir, table)
-		//exclude view data
-		excludeTable = excludeTable + table + ","
-	} else {
-		file = fmt.Sprintf("%s/%s-schema.sql", args.Outdir, table)
+	for _, t := range qr {
+		routineName := t["ROUTINE_NAME"]
+		create, err := engine.QueryString(fmt.Sprintf("SHOW CREATE %s `%s`.`%s`", routineType, args.Database, routineName))
+		common.AssertNil(err)
+
+		schema := create[0][fmt.Sprintf("Create %s", strings.Title(strings.ToLower(routineType)))] + ";\n"
+		file := fmt.Sprintf("%s/%s-%s.sql", args.Outdir, routineName, strings.ToLower(routineType))
+		_ = common.WriteFile(file, schema)
+		log.Info("dumping.routine[%s.%s].schema...", args.Database, routineName)
 	}
-	_ = common.WriteFile(file, schema)
-	log.Info("dumping.table[%s.%s].schema...", args.Database, table)
 }
 
-func dumpTable(log *xlog.Log, conn *common.Connection, args *common.Args, table string) {
+func dumpTableSchema(log *xlog.Log, engine *xorm.Engine, args *common.Args, tableName string) {
+	qr, err := engine.QueryString(fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", args.Database, tableName))
+	common.AssertNil(err)
+	file := fmt.Sprintf("%s/%s-table.sql", args.Outdir, tableName)
+	_ = common.WriteFile(file, qr[0]["Create Table"]+";\n")
+	log.Info("dumping.table[%s.%s].schema...", args.Database, tableName)
+}
+
+func dumpTable(log *xlog.Log, engine *xorm.Engine, args *common.Args, table *core.Table) {
 	var allBytes uint64
 	var allRows uint64
 
-	cursor, err := conn.StreamFetch(fmt.Sprintf("SELECT /*backup*/ * FROM `%s`.`%s`", args.Database, table))
+	cursor, err := engine.DB().Query(fmt.Sprintf("SELECT /*backup*/ * FROM `%s`.`%s`", args.Database, table.Name))
 	common.AssertNil(err)
 
-	fields := make([]string, 0, 16)
-	flds := cursor.Fields()
-	for _, fld := range flds {
-		fields = append(fields, fmt.Sprintf("`%s`", fld.Name))
-	}
+	cols := table.ColumnsSeq()
+	dialect := engine.Dialect()
+	destColNames := dialect.Quote(strings.Join(cols, dialect.Quote(", ")))
 
 	fileNo := 1
 	stmtsize := 0
@@ -71,24 +77,66 @@ func dumpTable(log *xlog.Log, conn *common.Connection, args *common.Args, table 
 	rows := make([]string, 0, 256)
 	inserts := make([]string, 0, 256)
 	for cursor.Next() {
-		row, err := cursor.RowValues()
+		dest := make([]interface{}, len(cols))
+		err = cursor.ScanSlice(&dest)
 		common.AssertNil(err)
 
-		values := make([]string, 0, 16)
-		for _, v := range row {
-			if v.Raw() == nil {
-				values = append(values, "NULL")
-			} else {
-				str := v.String()
-				switch {
-				case v.IsSigned(), v.IsUnsigned(), v.IsFloat(), v.IsIntegral(), v.Type() == querypb.Type_DECIMAL:
-					values = append(values, str)
+		var temp string
+		for i, d := range dest {
+			col := table.GetColumn(cols[i])
+
+			if d == nil {
+				temp += ", NULL"
+			} else if col.SQLType.IsText() || col.SQLType.IsTime() {
+				var v = fmt.Sprintf("%s", d)
+				if strings.HasSuffix(v, " +0000 UTC") {
+					temp += fmt.Sprintf(", '%s'", v[0:len(v)-len(" +0000 UTC")])
+				} else {
+					temp += ", '" + common.EscapeString(v) + "'"
+				}
+			} else if col.SQLType.IsBlob() {
+				if reflect.TypeOf(d).Kind() == reflect.Slice {
+					temp += fmt.Sprintf(", %s", dialect.FormatBytes(d.([]byte)))
+				} else if reflect.TypeOf(d).Kind() == reflect.String {
+					temp += fmt.Sprintf(", '%s'", d.(string))
+				}
+			} else if col.SQLType.IsNumeric() {
+				switch reflect.TypeOf(d).Kind() {
+				case reflect.Slice:
+					if col.SQLType.Name == core.Bool {
+						temp += fmt.Sprintf(", %v", strconv.FormatBool(d.([]byte)[0] != byte('0')))
+					} else {
+						temp += fmt.Sprintf(", %s", string(d.([]byte)))
+					}
+				case reflect.Int16, reflect.Int8, reflect.Int32, reflect.Int64, reflect.Int:
+					if col.SQLType.Name == core.Bool {
+						temp += fmt.Sprintf(", %v", strconv.FormatBool(reflect.ValueOf(d).Int() > 0))
+					} else {
+						temp += fmt.Sprintf(", %v", d)
+					}
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					if col.SQLType.Name == core.Bool {
+						temp += fmt.Sprintf(", %v", strconv.FormatBool(reflect.ValueOf(d).Uint() > 0))
+					} else {
+						temp += fmt.Sprintf(", %v", d)
+					}
 				default:
-					values = append(values, fmt.Sprintf("\"%s\"", common.EscapeBytes(v.Raw())))
+					temp += fmt.Sprintf(", %v", d)
+				}
+			} else {
+				s := fmt.Sprintf("%v", d)
+				if strings.Contains(s, ":") || strings.Contains(s, "-") {
+					if strings.HasSuffix(s, " +0000 UTC") {
+						temp += fmt.Sprintf(", '%s'", s[0:len(s)-len(" +0000 UTC")])
+					} else {
+						temp += fmt.Sprintf(", '%s'", s)
+					}
+				} else {
+					temp += fmt.Sprintf(", %s", s)
 				}
 			}
 		}
-		r := "(" + strings.Join(values, ",") + ")"
+		r := "(" + temp[2:] + ")"
 		rows = append(rows, r)
 
 		allRows++
@@ -99,7 +147,7 @@ func dumpTable(log *xlog.Log, conn *common.Connection, args *common.Args, table 
 		atomic.AddUint64(&args.Allrows, 1)
 
 		if stmtsize >= args.StmtSize {
-			insertone := fmt.Sprintf("INSERT INTO `%s`(%s) VALUES\n%s", table, strings.Join(fields, ","), strings.Join(rows, ",\n"))
+			insertone := fmt.Sprintf("INSERT INTO `%s`(%s) VALUES\n%s", table.Name, destColNames, strings.Join(rows, ",\n"))
 			inserts = append(inserts, insertone)
 			rows = rows[:0]
 			stmtsize = 0
@@ -107,10 +155,10 @@ func dumpTable(log *xlog.Log, conn *common.Connection, args *common.Args, table 
 
 		if (chunkbytes / 1024 / 1024) >= args.ChunksizeInMB {
 			query := strings.Join(inserts, ";\n") + ";\n"
-			file := fmt.Sprintf("%s/%s.%05d.sql", args.Outdir, table, fileNo)
+			file := fmt.Sprintf("%s/%s.%05d.sql", args.Outdir, table.Name, fileNo)
 			_ = common.WriteFile(file, query)
 
-			log.Info("dumping.table[%s.%s].rows[%v].bytes[%vMB].part[%v].thread[%d]", args.Database, table, allRows, allBytes/1024/1024, fileNo, conn.ID)
+			log.Info("dumping.table[%s.%s].rows[%v].bytes[%vMB].part[%v]", args.Database, table.Name, allRows, allBytes/1024/1024, fileNo)
 			inserts = inserts[:0]
 			chunkbytes = 0
 			fileNo++
@@ -118,77 +166,53 @@ func dumpTable(log *xlog.Log, conn *common.Connection, args *common.Args, table 
 	}
 	if chunkbytes > 0 {
 		if len(rows) > 0 {
-			insertone := fmt.Sprintf("INSERT INTO `%s`(%s) VALUES\n%s", table, strings.Join(fields, ","), strings.Join(rows, ",\n"))
+			insertone := fmt.Sprintf("INSERT INTO `%s`(%s) VALUES\n%s", table.Name, destColNames, strings.Join(rows, ",\n"))
 			inserts = append(inserts, insertone)
 		}
 
 		query := strings.Join(inserts, ";\n") + ";\n"
-		file := fmt.Sprintf("%s/%s.%05d.sql", args.Outdir, table, fileNo)
+		file := fmt.Sprintf("%s/%s.%05d.sql", args.Outdir, table.Name, fileNo)
 		_ = common.WriteFile(file, query)
 	}
 	err = cursor.Close()
 	common.AssertNil(err)
 
-	log.Info("dumping.table[%s.%s].done.allrows[%v].allbytes[%vMB].thread[%d]...", args.Database, table, allRows, allBytes/1024/1024, conn.ID)
-}
-
-func allTables(conn *common.Connection, args *common.Args) []string {
-	qr, err := conn.Fetch(fmt.Sprintf("SHOW TABLES FROM `%s`", args.Database))
-	common.AssertNil(err)
-
-	tables := make([]string, 0, 128)
-	for _, t := range qr.Rows {
-		tables = append(tables, t[0].String())
-	}
-	return tables
+	log.Info("dumping.table[%s.%s].done.allrows[%v].allbytes[%vMB]...", args.Database, table.Name, allRows, allBytes/1024/1024)
 }
 
 // Dumper used to start the dumper worker.
-func Dumper(log *xlog.Log, args *common.Args) {
-	pool, err := common.NewPool(log, args.Threads, args.Address, args.User, args.Password)
-	common.AssertNil(err)
-	defer pool.Close()
-
-	// database name
-	writeDBName(args)
-
-	// database.
-	conn := pool.Get()
+func Dumper(log *xlog.Log, args *common.Args, engine *xorm.Engine) {
 
 	var wg sync.WaitGroup
-	var tables []string
 	t := time.Now()
 
-	//function
-	dumpFunctionSchema(log, conn, args)
+	tables, err := engine.DBMetas()
+	common.AssertNil(err)
 
-	//table
-	if args.ExcludeTables != "" {
-		excludeTable = excludeTable + args.ExcludeTables + ","
-	}
-	if args.Table != "" {
-		tables = strings.Split(args.Table, ",")
-	} else {
-		tables = allTables(conn, args)
-	}
-	pool.Put(conn)
+	//databaseName
+	go writeDBName(args)
+	//function
+	go dumpRoutineSchema(log, engine, args, "FUNCTION")
+	//procedure
+	go dumpRoutineSchema(log, engine, args, "PROCEDURE")
+	//view
+	go dumpViewSchema(log, engine, args)
 
 	for _, table := range tables {
-		conn := pool.Get()
-		dumpTableSchema(log, conn, args, table)
+		dumpTableSchema(log, engine, args, table.Name)
+
 		wg.Add(1)
-		go func(conn *common.Connection, table string) {
+		go func(engine *xorm.Engine, table *core.Table) {
 			defer func() {
 				wg.Done()
-				pool.Put(conn)
 			}()
 			// excludeTable can't dump data
-			if !strings.Contains(excludeTable, table) {
-				log.Info("dumping.table[%s.%s].datas.thread[%d]...", args.Database, table, conn.ID)
-				dumpTable(log, conn, args, table)
-				log.Info("dumping.table[%s.%s].datas.thread[%d].done...", args.Database, table, conn.ID)
+			if !strings.Contains(args.ExcludeTables, table.Name) {
+				log.Info("dumping.table[%s.%s].datas...", args.Database, table.Name)
+				dumpTable(log, engine, args, table)
+				log.Info("dumping.table[%s.%s].datas.done...", args.Database, table.Name)
 			}
-		}(conn, table)
+		}(engine, table)
 	}
 
 	tick := time.NewTicker(time.Millisecond * time.Duration(args.IntervalMs))
@@ -202,7 +226,6 @@ func Dumper(log *xlog.Log, args *common.Args) {
 			log.Info("dumping.allbytes[%vMB].allrows[%v].time[%.2fsec].rates[%.2fMB/sec]...", allbytesMB, allrows, diff, rates)
 		}
 	}()
-
 	wg.Wait()
 	elapsedStr, elapsed := time.Since(t).String(), time.Since(t).Seconds()
 	log.Info("dumping.all.done.cost[%s].allrows[%v].allbytes[%v].rate[%.2fMB/s]", elapsedStr, args.Allrows, args.Allbytes, float64(args.Allbytes/1024/1024)/elapsed)

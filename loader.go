@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"math/rand"
+	"github.com/go-xorm/xorm"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,21 +16,22 @@ import (
 
 // Files tuple.
 type Files struct {
-	function []string
-	schemas  []string
-	tables   []string
+	procedures []string
+	functions  []string
+	tables     []string
+	views      []string
+	datas      []string
 }
 
 var (
-	functionSuffix = "-schema-function.sql"
-	viewSuffix     = "-schema-view.sql"
-	schemaSuffix   = "-schema.sql"
-	tableSuffix    = ".sql"
-	dbName         = ""
+	procedureSuffix = "-procedure.sql"
+	functionSuffix  = "-function.sql"
+	tableSuffix     = "-table.sql"
+	viewSuffix      = "-view.sql"
+	dataSuffix      = ".sql"
 )
 
 func loadFiles(log *xlog.Log, dir string) *Files {
-	var views []string
 	files := &Files{}
 	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -39,15 +40,17 @@ func loadFiles(log *xlog.Log, dir string) *Files {
 
 		if !info.IsDir() {
 			switch {
-			case strings.HasSuffix(path, schemaSuffix):
-				files.schemas = append(files.schemas, path)
+			case strings.HasSuffix(path, tableSuffix):
+				files.tables = append(files.tables, path)
 			case strings.HasSuffix(path, functionSuffix):
-				files.function = append(files.function, path)
+				files.functions = append(files.functions, path)
+			case strings.HasSuffix(path, procedureSuffix):
+				files.procedures = append(files.procedures, path)
 			case strings.HasSuffix(path, viewSuffix):
-				views = append(views, path)
+				files.views = append(files.views, path)
 			default:
-				if strings.HasSuffix(path, tableSuffix) {
-					files.tables = append(files.tables, path)
+				if strings.HasSuffix(path, dataSuffix) {
+					files.datas = append(files.datas, path)
 				}
 			}
 		}
@@ -55,153 +58,74 @@ func loadFiles(log *xlog.Log, dir string) *Files {
 	}); err != nil {
 		log.Panicf("loader.file.walk.error:%+v", err)
 	}
-	// put views schemas after table schemas
-	if len(views) > 0 {
-		files.schemas = append(files.schemas, views...)
-	}
 	return files
 }
 
-func restoreDatabaseSchema(log *xlog.Log, db string, conn *common.Connection) {
-	if db == "" {
-		metaFile := filepath.Base("dbname")
-		data, err := common.ReadFile(metaFile)
-		common.AssertNil(err)
-		dbName = common.BytesToString(data)
-	} else {
-		dbName = db
-	}
-	sql := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`;", dbName)
-	err := conn.Execute(sql)
-	common.AssertNil(err)
-	log.Info("restoring.database[%s]", dbName)
-}
-
-func restoreFunctionSchema(log *xlog.Log, functions []string, conn *common.Connection) {
-	for _, function := range functions {
-		name := strings.TrimSuffix(filepath.Base(function), functionSuffix)
-
-		dropQuery := fmt.Sprintf("DROP FUNCTION IF EXISTS %s", name)
-		err := conn.Execute(dropQuery)
+func restoreSchema(log *xlog.Log, engine *xorm.Engine, schemas []string, key string) {
+	for _, schema := range schemas {
+		name := strings.TrimSuffix(filepath.Base(schema), fmt.Sprintf("-%s.sql", key))
+		dropQuery := fmt.Sprintf("DROP %s IF EXISTS %s", strings.ToUpper(key), name)
+		_, err := engine.DB().Exec(dropQuery)
 		common.AssertNil(err)
 
-		data, err := common.ReadFile(function)
+		data, err := common.ReadFile(schema)
 		common.AssertNil(err)
 		query := common.BytesToString(data)
-
-		err = conn.Execute(query)
+		_, err = engine.DB().Exec(query)
 		common.AssertNil(err)
-		log.Info("restoring.function[%s]", name)
+		log.Info("restoring.schema.%s[%s]", key, name)
 	}
 }
 
-func restoreTableSchema(log *xlog.Log, overwrite bool, tables []string, conn *common.Connection) {
-	for _, table := range tables {
-		// use
-		base := filepath.Base(table)
-		name := strings.TrimSuffix(base, schemaSuffix)
-
-		log.Info("working.table[%s]", name)
-
-		err := conn.Execute("SET FOREIGN_KEY_CHECKS=0")
-		common.AssertNil(err)
-
-		data, err := common.ReadFile(table)
-		common.AssertNil(err)
-		query1 := common.BytesToString(data)
-		querys := strings.Split(query1, ";\n")
-		for _, query := range querys {
-			if !strings.HasPrefix(query, "/*") && query != "" {
-				if overwrite {
-					log.Info("drop(overwrite.is.true).table[%s]", name)
-					dropQuery := fmt.Sprintf("DROP TABLE IF EXISTS %s", name)
-					err = conn.Execute(dropQuery)
-					common.AssertNil(err)
-				}
-				err = conn.Execute(query)
-				common.AssertNil(err)
-			}
-		}
-		log.Info("restoring.schema[%s]", name)
-	}
-}
-
-func restoreTable(log *xlog.Log, table string, conn *common.Connection) int {
-	bytes := 0
+func restoreData(log *xlog.Log, table string, engine *xorm.Engine) int {
 	part := "0"
 	base := filepath.Base(table)
-	name := strings.TrimSuffix(base, tableSuffix)
+	name := strings.TrimSuffix(base, dataSuffix)
 	splits := strings.Split(name, ".")
 	tb := splits[0]
 	if len(splits) > 1 {
 		part = splits[1]
 	}
 
-	log.Info("restoring.tables[%s].parts[%s].thread[%d]", tb, part, conn.ID)
-	err := conn.Execute(fmt.Sprintf("USE `%s`", dbName))
-	common.AssertNil(err)
+	log.Info("restoring.tables[%s].parts[%s]", tb, part)
 
-	err = conn.Execute("SET FOREIGN_KEY_CHECKS=0")
+	bytes, err := common.ReadFile(table)
 	common.AssertNil(err)
-
-	data, err := common.ReadFile(table)
-	common.AssertNil(err)
-	query1 := common.BytesToString(data)
-	querys := strings.Split(query1, ";\n")
-	bytes = len(query1)
-	for _, query := range querys {
-		if !strings.HasPrefix(query, "/*") && query != "" {
-			err = conn.Execute(query)
+	sqlStr := common.BytesToString(bytes)
+	sqls := strings.Split(sqlStr, ";\n")
+	for _, sql := range sqls {
+		if sql != "" {
+			_, _ = engine.DB().Exec("SET FOREIGN_KEY_CHECKS=0")
+			_, err = engine.DB().Exec(sql)
 			common.AssertNil(err)
 		}
 	}
-	log.Info("restoring.tables[%s].parts[%s].thread[%d].done...", tb, part, conn.ID)
-	return bytes
+	log.Info("restoring.tables[%s].parts[%s].done...", tb, part)
+	return len(bytes)
 }
 
 // Loader used to start the loader worker.
-func Loader(log *xlog.Log, args *common.Args) {
-	pool, err := common.NewPool(log, args.Threads, args.Address, args.User, args.Password)
-	common.AssertNil(err)
-	defer pool.Close()
-
+func Loader(log *xlog.Log, args *common.Args, engine *xorm.Engine) {
 	t := time.Now()
 	files := loadFiles(log, args.Outdir)
-
-	conn := pool.Get()
-
-	// database.
-	restoreDatabaseSchema(log, args.Database, conn)
-
-	err = conn.Execute(fmt.Sprintf("USE `%s`", dbName))
-	common.AssertNil(err)
-
-	// function.
-	restoreFunctionSchema(log, files.function, conn)
-	// tables.
-	restoreTableSchema(log, args.OverwriteTables, files.schemas, conn)
-
-	pool.Put(conn)
-
-	// Shuffle the tables
-	for i := range files.tables {
-		j := rand.Intn(i + 1)
-		files.tables[i], files.tables[j] = files.tables[j], files.tables[i]
-	}
+	_, _ = engine.DB().Exec("SET FOREIGN_KEY_CHECKS=0")
+	go restoreSchema(log, engine, files.functions, "function")
+	go restoreSchema(log, engine, files.procedures, "procedure")
+	restoreSchema(log, engine, files.tables, "table")
+	restoreSchema(log, engine, files.views, "view")
 
 	var wg sync.WaitGroup
+
 	var bytes uint64
-	for _, table := range files.tables {
-		conn := pool.Get()
+	for _, table := range files.datas {
 		wg.Add(1)
-		go func(conn *common.Connection, table string) {
+		go func(engine *xorm.Engine, table string) {
 			defer func() {
 				wg.Done()
-				pool.Put(conn)
 			}()
-			r := restoreTable(log, table, conn)
+			r := restoreData(log, table, engine)
 			atomic.AddUint64(&bytes, uint64(r))
-		}(conn, table)
+		}(engine, table)
 	}
 
 	tick := time.NewTicker(time.Millisecond * time.Duration(args.IntervalMs))

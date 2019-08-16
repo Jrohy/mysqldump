@@ -4,31 +4,47 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"reflect"
+	"unsafe"
 )
 
 // Args tuple.
 type Args struct {
-	User            string
-	Password        string
-	Address         string
-	ToUser          string
-	ToPassword      string
-	ToAddress       string
-	ToDatabase      string
-	ToEngine        string
-	Database        string
-	Table           string
-	Outdir          string
-	ExcludeTables   string
-	Threads         int
-	ChunksizeInMB   int
-	StmtSize        int
-	Allbytes        uint64
-	Allrows         uint64
-	OverwriteTables bool
+	Database      string
+	Outdir        string
+	ExcludeTables string
+	Threads       int
+	ChunksizeInMB int
+	StmtSize      int
+	Allbytes      uint64
+	Allrows       uint64
 
 	// Interval in millisecond.
 	IntervalMs int
+}
+
+// BytesToString casts slice to string without copy
+func BytesToString(b []byte) (s string) {
+	if len(b) == 0 {
+		return ""
+	}
+
+	bh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	sh := reflect.StringHeader{Data: bh.Data, Len: bh.Len}
+
+	return *(*string)(unsafe.Pointer(&sh))
+}
+
+// StringToBytes casts string to slice without copy
+func StringToBytes(s string) []byte {
+	if len(s) == 0 {
+		return []byte{}
+	}
+
+	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))
+	bh := reflect.SliceHeader{Data: sh.Data, Len: sh.Len, Cap: sh.Len}
+
+	return *(*[]byte)(unsafe.Pointer(&bh))
 }
 
 // WriteFile used to write datas to file.
@@ -65,34 +81,47 @@ func AssertNil(err error) {
 	}
 }
 
-// EscapeBytes used to escape the literal byte.
-func EscapeBytes(bytes []byte) []byte {
-	buffer := NewBuffer(128)
-	for _, b := range bytes {
-		// See https://dev.mysql.com/doc/refman/5.7/en/string-literals.html
-		// for more information on how to escape string literals in MySQL.
-		switch b {
-		case 0:
-			buffer.WriteString(`\0`)
-		case '\'':
-			buffer.WriteString(`\'`)
-		case '"':
-			buffer.WriteString(`\"`)
-		case '\b':
-			buffer.WriteString(`\b`)
+func EscapeString(v string) string {
+	var pos = 0
+	if len(v) == 0 {
+		return ""
+	}
+	buf := make([]byte, len(v[:])*2)
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch c {
+		case '\x00':
+			buf[pos] = '\\'
+			buf[pos+1] = '0'
+			pos += 2
 		case '\n':
-			buffer.WriteString(`\n`)
+			buf[pos] = '\\'
+			buf[pos+1] = 'n'
+			pos += 2
 		case '\r':
-			buffer.WriteString(`\r`)
-		case '\t':
-			buffer.WriteString(`\t`)
-		case 0x1A:
-			buffer.WriteString(`\Z`)
+			buf[pos] = '\\'
+			buf[pos+1] = 'r'
+			pos += 2
+		case '\x1a':
+			buf[pos] = '\\'
+			buf[pos+1] = 'Z'
+			pos += 2
+		case '\'':
+			buf[pos] = '\\'
+			buf[pos+1] = '\''
+			pos += 2
+		case '"':
+			buf[pos] = '\\'
+			buf[pos+1] = '"'
+			pos += 2
 		case '\\':
-			buffer.WriteString(`\\`)
+			buf[pos] = '\\'
+			buf[pos+1] = '\\'
+			pos += 2
 		default:
-			buffer.WriteU8(b)
+			buf[pos] = c
+			pos++
 		}
 	}
-	return buffer.Datas()
+	return string(buf[:pos])
 }
