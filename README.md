@@ -4,7 +4,7 @@
 
 go语言版mysqldump, goroutine并发导sql, 比navicat等工具导出sql快！
 
-支持 **MySQL (4.1+), MariaDB版本**
+支持 **MySQL (4.1+), MariaDB**
 
 此项目为: https://github.com/xelabs/go-mydumper 项目的修改优化版
 
@@ -15,7 +15,7 @@ go语言版mysqldump, goroutine并发导sql, 比navicat等工具导出sql快！
 - 优化日志格式和运行时间的显示
 - 合并导入和导出sql功能到同一个文件(-i/-o来分区)
 - 提供所有平台的release编译文件
-- 访问数据库使用使用框架xorm, 使其支持MySQL8和MariaDB
+- 访问数据库使用框架xorm, 使其支持MySQL8和MariaDB
 
 ## 命令行
 ```
